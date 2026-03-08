@@ -1,6 +1,14 @@
 // src/tools.ts
 import type { AnyAgentTool } from "openclaw/plugin-sdk";
-import { jsonResult, readStringParam, readNumberParam, readStringArrayParam } from "openclaw/plugin-sdk";
+import { jsonResult, readStringParam, readNumberParam } from "openclaw/plugin-sdk";
+
+function readStringArrayParam(p: Record<string, unknown>, key: string): string[] | undefined {
+  const val = p[key];
+  if (val === undefined || val === null) return undefined;
+  if (Array.isArray(val)) return val.filter((v): v is string => typeof v === "string");
+  if (typeof val === "string") return [val];
+  return undefined;
+}
 import { readState, updateState } from "./storage.js";
 import { fetchJobs } from "./fetcher.js";
 import { filterByConditions, deduplicateJobs } from "./filter.js";
