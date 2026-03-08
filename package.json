@@ -1,0 +1,20 @@
+{
+  "name": "boss-zhipin",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Boss直聘岗位推送 OpenClaw 插件",
+  "main": "index.ts",
+  "files": [
+    "index.ts",
+    "src/",
+    "openclaw.plugin.json"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "openclaw": ">=2026.2.24"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}
