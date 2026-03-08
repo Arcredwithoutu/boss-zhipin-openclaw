@@ -40,6 +40,7 @@ export function formatStatusReport(state: {
   cookieExpired?: boolean;
   cookieUpdatedAt?: string;
   filters?: Record<string, unknown>;
+  proxy?: string;
 }): string {
   const lines: string[] = ["📊 Boss直聘插件状态\n"];
 
@@ -52,6 +53,12 @@ export function formatStatusReport(state: {
       ? new Date(state.cookieUpdatedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })
       : "未知";
     lines.push(`✅ Cookie：有效（更新于 ${updatedAt}）`);
+  }
+
+  if (state.proxy) {
+    lines.push(`🌐 代理：${state.proxy}`);
+  } else {
+    lines.push("🌐 代理：未配置（直连）");
   }
 
   if (state.filters && Object.keys(state.filters).length > 0) {

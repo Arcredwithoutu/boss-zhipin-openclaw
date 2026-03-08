@@ -28,6 +28,10 @@
       "cronTz": {
         "type": "string",
         "default": "Asia/Shanghai"
+      },
+      "proxy": {
+        "type": "string",
+        "description": "代理地址，如 socks5://127.0.0.1:1080 或 http://host:port。境外服务器需配置国内代理"
       }
     }
   }

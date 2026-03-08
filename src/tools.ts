@@ -152,6 +152,7 @@ export const bossFetchJobsTool: AnyAgentTool = {
       cookie: state.cookie,
       filters,
       pageSize: Math.min(limit, 20),
+      proxy: state.proxy,
     });
 
     if (!result.ok) {
@@ -160,8 +161,7 @@ export const bossFetchJobsTool: AnyAgentTool = {
         return jsonResult({
           ok: false,
           expired: true,
-          message:
-            "⚠️ Boss直聘 Cookie 已失效。请重新登录 Boss直聘，从浏览器开发者工具中复制 Cookie，然后发送给我更新。",
+          message: result.message,
         });
       }
       return jsonResult({ ok: false, expired: false, message: `拉取失败：${result.error}` });
@@ -200,8 +200,41 @@ export const bossGetStatusTool: AnyAgentTool = {
       cookieExpired: state.cookieExpired,
       cookieUpdatedAt: state.cookieUpdatedAt,
       filters: state.filters as any,
+      proxy: state.proxy,
     });
     return jsonResult({ ok: true, report });
+  },
+};
+
+// ─── boss_set_proxy ──────────────────────────────────────────────────────
+
+export const bossSetProxyTool: AnyAgentTool = {
+  name: "boss_set_proxy",
+  label: "Set Boss直聘 proxy",
+  description:
+    "设置请求 Boss直聘 API 时使用的代理地址。支持 socks5:// 和 http:// 协议。如果服务器在境外，需要通过国内代理才能正常访问 Boss直聘。传空字符串可清除代理。",
+  parameters: {
+    type: "object",
+    additionalProperties: false,
+    required: ["proxy"],
+    properties: {
+      proxy: {
+        type: "string",
+        description: "代理地址，如 socks5://127.0.0.1:1080 或 http://127.0.0.1:8080，传空字符串清除",
+      },
+    },
+  } as any,
+  async execute(_id, params) {
+    const proxy = readStringParam(params as any, "proxy", { required: true });
+    if (proxy === "") {
+      await updateState({ proxy: undefined });
+      return jsonResult({ ok: true, message: "代理已清除，将直连请求。" });
+    }
+    if (!/^(socks[45]?|https?):\/\/.+/.test(proxy)) {
+      return jsonResult({ ok: false, message: "代理格式无效，请使用 socks5://host:port 或 http://host:port" });
+    }
+    await updateState({ proxy });
+    return jsonResult({ ok: true, message: `代理已设置为 ${proxy}` });
   },
 };
 
@@ -210,4 +243,5 @@ export const ALL_TOOLS: AnyAgentTool[] = [
   bossSetFiltersTool,
   bossFetchJobsTool,
   bossGetStatusTool,
+  bossSetProxyTool,
 ];

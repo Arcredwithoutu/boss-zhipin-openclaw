@@ -1,6 +1,7 @@
 // index.ts
 import type { OpenClawPluginApi, OpenClawPluginServiceContext } from "openclaw/plugin-sdk";
 import { ALL_TOOLS } from "./src/tools.js";
+import { readState, updateState } from "./src/storage.js";
 
 const CRON_JOB_NAME = "boss-zhipin-push";
 
@@ -13,6 +14,7 @@ type PluginConfig = {
   };
   cronExpr?: string;
   cronTz?: string;
+  proxy?: string;
 };
 
 async function ensureCronJob(
@@ -107,6 +109,14 @@ const plugin = {
     api.registerService({
       id: "boss-zhipin-cron-setup",
       async start(ctx) {
+        // Sync proxy from plugin config to state if not set via IM
+        if (pluginConfig.proxy) {
+          const state = await readState();
+          if (!state.proxy) {
+            await updateState({ proxy: pluginConfig.proxy });
+            ctx.logger.info(`[boss-zhipin] Proxy initialized from config: ${pluginConfig.proxy}`);
+          }
+        }
         await ensureCronJob(ctx, pluginConfig);
       },
     });
