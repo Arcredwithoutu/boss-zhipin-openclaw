@@ -102,14 +102,17 @@ async function fetchOnePage(opts: FetchOptions & { page: number }): Promise<Fetc
     encryptJobId: j.encryptJobId ?? "",
     jobName: j.jobName ?? "",
     brandName: j.brandName ?? "",
+    brandScaleName: j.brandScaleName,
+    brandIndustry: j.brandIndustry,
     cityName: j.cityName ?? "",
     areaDistrict: j.areaDistrict,
     salaryDesc: j.salaryDesc ?? "",
     jobLabels: Array.isArray(j.jobLabels) ? j.jobLabels : [],
-    experienceName: j.experienceName,
-    degreeName: j.degreeName,
+    jobExperience: j.jobExperience,
+    jobDegree: j.jobDegree,
+    skills: Array.isArray(j.skills) ? j.skills : [],
+    welfareList: Array.isArray(j.welfareList) ? j.welfareList : [],
     lastModifyTime: j.lastModifyTime,
-    publishTime: j.publishTime ?? j.lastModifyTime?.toString(),
   }));
 
   return { ok: true, jobs: jobList };

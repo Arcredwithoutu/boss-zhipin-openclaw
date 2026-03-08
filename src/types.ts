@@ -23,12 +23,15 @@ export type JobItem = {
   encryptJobId: string;
   jobName: string;
   brandName: string;
+  brandScaleName?: string;    // 公司规模，如 "10000人以上"
+  brandIndustry?: string;     // 行业，如 "互联网"
   cityName: string;
   areaDistrict?: string;
   salaryDesc: string;
   jobLabels?: string[];
-  experienceName?: string;
-  degreeName?: string;
+  jobExperience?: string;     // 经验要求，如 "1-3年"
+  jobDegree?: string;         // 学历要求，如 "本科"
+  skills?: string[];          // 技能标签，如 ["Java", "MySQL", "Spring"]
+  welfareList?: string[];     // 福利标签
   lastModifyTime?: number;    // epoch ms
-  publishTime?: string;       // human readable
 };

@@ -4,15 +4,17 @@ import { buildJobLink } from "./fetcher.js";
 
 function formatJob(job: JobItem): string {
   const location = [job.cityName, job.areaDistrict].filter(Boolean).join("-");
-  const requirements = [job.experienceName, job.degreeName, ...(job.jobLabels ?? [])]
-    .filter(Boolean)
-    .join(" / ");
+  const companyInfo = [job.brandName, job.brandIndustry, job.brandScaleName].filter(Boolean).join(" · ");
+  const requirements = [job.jobExperience, job.jobDegree].filter(Boolean).join(" / ");
+  const skillsStr = job.skills?.length ? job.skills.join(", ") : "";
   const link = buildJobLink(job.encryptJobId);
 
   return [
-    `【${job.jobName}】 ${job.brandName} · ${location}`,
+    `【${job.jobName}】 ${companyInfo}`,
+    `📍 ${location}`,
     `💰 ${job.salaryDesc}`,
     requirements ? `📌 要求：${requirements}` : null,
+    skillsStr ? `🏷️ 技能：${skillsStr}` : null,
     `🔗 ${link}`,
   ]
     .filter(Boolean)
