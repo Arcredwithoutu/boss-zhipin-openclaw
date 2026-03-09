@@ -246,10 +246,180 @@ export const bossSetProxyTool: AnyAgentTool = {
   },
 };
 
+// ─── boss_browser_login ──────────────────────────────────────────────────
+
+export const bossBrowserLoginTool: AnyAgentTool = {
+  name: "boss_browser_login",
+  label: "Boss直聘 browser login",
+  description:
+    "通过浏览器登录 Boss直聘。启动 Chromium 打开登录页面并截图，用户扫描微信二维码完成登录。" +
+    "登录成功后自动保存 Cookie，后续 boss_browser_fetch 可自动使用。",
+  parameters: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      action: {
+        type: "string",
+        enum: ["start", "check"],
+        description: "start=发起登录并截图二维码，check=检查登录是否完成",
+      },
+    },
+    required: ["action"],
+  } as any,
+  async execute(_id, params) {
+    const action = readStringParam(params as any, "action", { required: true });
+    const { startLogin, waitForLogin, hasSavedBrowserCookies } = await import("./browser.js");
+    const state = await readState();
+
+    if (action === "start") {
+      const result = await startLogin(state.proxy);
+      if (result._browser && result._page) {
+        // 保存 browser/page 引用到全局，供 check 使用
+        (globalThis as any).__boss_login_browser = result._browser;
+        (globalThis as any).__boss_login_page = result._page;
+
+        // 启动后台等待（最多 2 分钟）
+        waitForLogin(result._browser, result._page, 120_000).then(async (loginResult) => {
+          if (loginResult.ok) {
+            // 登录成功，同步 cookie 到 state
+            const { getSavedCookieString } = await import("./browser.js");
+            const cookieStr = await getSavedCookieString();
+            if (cookieStr) {
+              await updateState({
+                cookie: cookieStr,
+                cookieUpdatedAt: new Date().toISOString(),
+                cookieExpired: false,
+              });
+            }
+          }
+          (globalThis as any).__boss_login_browser = undefined;
+          (globalThis as any).__boss_login_page = undefined;
+        });
+
+        return jsonResult({
+          ok: true,
+          qrPath: result.qrPath,
+          message: `📸 登录页截图已保存到 ${result.qrPath}。请查看截图并使用微信扫码登录。扫码后等待约 5 秒，然后调用 boss_browser_login(action="check") 确认登录状态。`,
+        });
+      }
+      return jsonResult({ ok: false, message: result.message });
+    }
+
+    if (action === "check") {
+      // 检查登录是否已完成
+      const hasCookies = await hasSavedBrowserCookies();
+      if (hasCookies) {
+        const { getSavedCookieString } = await import("./browser.js");
+        const cookieStr = await getSavedCookieString();
+        if (cookieStr) {
+          await updateState({
+            cookie: cookieStr,
+            cookieUpdatedAt: new Date().toISOString(),
+            cookieExpired: false,
+          });
+        }
+        return jsonResult({ ok: true, message: "✅ 登录成功，Cookie 已保存并同步。" });
+      }
+
+      const browser = (globalThis as any).__boss_login_browser;
+      if (browser) {
+        return jsonResult({ ok: false, message: "⏳ 登录仍在进行中，请扫码后再次 check。" });
+      }
+      return jsonResult({ ok: false, message: "❌ 没有进行中的登录会话。请先调用 action=start。" });
+    }
+
+    return jsonResult({ ok: false, message: `未知 action: ${action}` });
+  },
+};
+
+// ─── boss_browser_fetch ─────────────────────────────────────────────────
+
+export const bossBrowserFetchTool: AnyAgentTool = {
+  name: "boss_browser_fetch",
+  label: "Fetch jobs via browser",
+  description:
+    "使用 Puppeteer 浏览器拉取 Boss直聘 岗位。浏览器会自动刷新 __zp_stoken__，无需手动更新 Cookie。" +
+    "优先用浏览器刷新 token 后走 HTTP API（更快），备选全浏览器拉取。" +
+    "需要 state 中有基础 Cookie（wt2/zp_at/bst）。适用于定时推送。",
+  parameters: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      limit: {
+        type: "number",
+        description: "最多返回岗位数量，默认 20",
+      },
+      deduplicate: {
+        type: "boolean",
+        description: "是否过滤已推送过的岗位，默认 true",
+      },
+    },
+  } as any,
+  async execute(_id, params) {
+    const p = params as Record<string, unknown>;
+    const limit = readNumberParam(p, "limit") ?? 20;
+    const deduplicate = typeof p.deduplicate === "boolean" ? p.deduplicate : true;
+
+    const state = await readState();
+    if (!state.cookie) {
+      return jsonResult({
+        ok: false,
+        message: "❌ 没有 Cookie，请先通过 boss_update_cookie 或 boss_browser_login 提供。",
+      });
+    }
+
+    // 步骤1：用浏览器刷新 __zp_stoken__
+    const { refreshToken } = await import("./browser.js");
+    const tokenResult = await refreshToken({
+      cookieString: state.cookie,
+      proxy: state.proxy,
+    });
+
+    if (!tokenResult.ok) {
+      return jsonResult({ ok: false, message: `Token 刷新失败：${tokenResult.error}` });
+    }
+
+    // 步骤2：用刷新后的 Cookie 走 HTTP API（更快、更轻量）
+    const filters: Filters = state.filters ?? {};
+    const result = await fetchJobs({
+      cookie: tokenResult.cookieString,
+      filters,
+      pageSize: Math.min(limit, 20),
+      proxy: state.proxy,
+    });
+
+    // 同步最新 cookie
+    await updateState({
+      cookie: tokenResult.cookieString,
+      cookieUpdatedAt: new Date().toISOString(),
+      cookieExpired: false,
+    });
+
+    if (!result.ok) {
+      if (result.expired) {
+        await updateState({ cookieExpired: true });
+        return jsonResult({ ok: false, expired: true, message: result.message });
+      }
+      return jsonResult({ ok: false, message: `拉取失败：${result.error}` });
+    }
+
+    let jobs = result.jobs.slice(0, limit);
+    jobs = filterByConditions(jobs, filters);
+    if (deduplicate) {
+      jobs = await deduplicateJobs(jobs);
+    }
+
+    const formatted = formatJobList(jobs);
+    return jsonResult({ ok: true, count: jobs.length, formatted });
+  },
+};
+
 export const ALL_TOOLS: AnyAgentTool[] = [
   bossUpdateCookieTool,
   bossSetFiltersTool,
   bossFetchJobsTool,
   bossGetStatusTool,
   bossSetProxyTool,
+  bossBrowserLoginTool,
+  bossBrowserFetchTool,
 ];
