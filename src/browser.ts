@@ -65,19 +65,28 @@ async function launchBrowser(proxy?: string): Promise<Browser> {
     args.push(`--proxy-server=${proxy}`);
   }
 
-  // 确保 xvfb 可用 — 如果 DISPLAY 已设置就用现有的，否则启动 xvfb-run
-  const hasDisplay = !!process.env.DISPLAY;
-
-  if (!hasDisplay) {
-    // 动态分配 DISPLAY
-    const displayNum = 99 + Math.floor(Math.random() * 900);
+  // 确保 Xvfb 虚拟显示可用
+  if (!process.env.DISPLAY) {
+    // 检查 :99 是否已有 Xvfb 运行
     try {
-      execSync(`Xvfb :${displayNum} -screen 0 1280x800x24 &`, { timeout: 3000 });
-      process.env.DISPLAY = `:${displayNum}`;
-      // 给 Xvfb 一点启动时间
-      await new Promise((r) => setTimeout(r, 500));
+      execSync("pgrep -f 'Xvfb :99'", { timeout: 2000 });
+      process.env.DISPLAY = ":99";
     } catch {
-      // Xvfb 可能已经在运行
+      // 没有运行，启动一个
+      try {
+        execSync("Xvfb :99 -screen 0 1280x800x24 &", { timeout: 3000 });
+        process.env.DISPLAY = ":99";
+        await new Promise((r) => setTimeout(r, 500));
+      } catch {
+        // 最后兜底：尝试 :100
+        try {
+          execSync("Xvfb :100 -screen 0 1280x800x24 &", { timeout: 3000 });
+          process.env.DISPLAY = ":100";
+          await new Promise((r) => setTimeout(r, 500));
+        } catch {
+          // Xvfb 不可用，让 puppeteer 报错
+        }
+      }
     }
   }
 
@@ -119,11 +128,14 @@ async function loadBrowserCookies(page: Page): Promise<boolean> {
 /**
  * 从 state.json 的 cookie 字符串注入到浏览器
  */
-async function injectCookieString(page: Page, cookieStr: string): Promise<void> {
-  const cookies = cookieStr.split("; ").map((pair) => {
-    const [name, ...rest] = pair.split("=");
-    return { name: name.trim(), value: rest.join("="), domain: ".zhipin.com", path: "/" };
-  });
+async function injectCookieString(page: Page, cookieStr: string, opts?: { stripStoken?: boolean }): Promise<void> {
+  const cookies = cookieStr
+    .split("; ")
+    .filter((pair) => !(opts?.stripStoken && pair.startsWith("__zp_stoken__=")))
+    .map((pair) => {
+      const [name, ...rest] = pair.split("=");
+      return { name: name.trim(), value: rest.join("="), domain: ".zhipin.com", path: "/" };
+    });
   await page.setCookie(...cookies);
 }
 
@@ -146,10 +158,11 @@ export type TokenRefreshResult =
  * 使用 Puppeteer 刷新 __zp_stoken__
  *
  * 流程：
- * 1. 启动浏览器，注入已有 Cookie
- * 2. 导航到搜索页 → 触发安全验证
- * 3. 验证通过后浏览器自动生成新 __zp_stoken__
- * 4. 提取并返回完整 Cookie
+ * 1. 启动浏览器，注入已有 Cookie（去掉旧 stoken 避免触发更严格检测）
+ * 2. 导航到搜索页 → about:blank 时自动重试
+ * 3. 重试后触发 security.html 安全验证
+ * 4. 验证通过后浏览器自动生成新 __zp_stoken__
+ * 5. 提取并返回完整 Cookie
  */
 export async function refreshToken(opts: {
   cookieString: string;
@@ -164,25 +177,50 @@ export async function refreshToken(opts: {
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     );
 
-    // 注入已有 Cookie
-    await injectCookieString(page, opts.cookieString);
+    // 注入已有 Cookie，去掉旧 __zp_stoken__（旧值会触发 verify-sdk 更严格的检测）
+    await injectCookieString(page, opts.cookieString, { stripStoken: true });
 
     const url = opts.searchUrl ?? "https://www.zhipin.com/web/geek/job?query=java&city=101020100";
+
+    // 带延迟的 about:blank 重试策略
+    // verify-sdk 检测到异常时跳转 about:blank，等待几秒再重试可降低限频风险
+    const MAX_RETRIES = 3;
+    const RETRY_DELAYS = [2000, 4000, 6000]; // 逐步增加延迟
+
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
 
-    // 等待安全验证完成 + stoken 刷新（最多 15 秒）
-    let lastStoken = "";
-    for (let i = 0; i < 30; i++) {
+    let refreshed = false;
+    let retries = 0;
+
+    for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 500));
+
+      const currentUrl = page.url();
+
+      // 检测到 about:blank → 等待后重试导航
+      if (currentUrl === "about:blank" && retries < MAX_RETRIES) {
+        retries++;
+        const delay = RETRY_DELAYS[retries - 1] ?? 5000;
+        await new Promise((r) => setTimeout(r, delay));
+        try {
+          await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20_000 });
+        } catch {
+          // ignore retry errors
+        }
+        continue;
+      }
+
+      // 页面含 _security_check → 验证已完成
+      if (currentUrl.includes("_security_check")) {
+        refreshed = true;
+        break;
+      }
+
+      // 检查 stoken（我们没注入旧的，任何 stoken 都是新生成的）
       const cookies = await browser.cookies("https://www.zhipin.com");
       const stoken = cookies.find((c) => c.name === "__zp_stoken__");
-      if (stoken && stoken.value !== lastStoken) {
-        lastStoken = stoken.value;
-      }
-      // 检查页面是否回到搜索页（验证完成的标志）
-      const currentUrl = page.url();
-      if (currentUrl.includes("/web/geek/job") && i > 6) {
-        // 页面稳定在搜索页 + 有 stoken → 刷新完成
+      if (stoken && stoken.value.length > 10 && currentUrl.includes("zhipin.com")) {
+        refreshed = true;
         break;
       }
     }
@@ -193,6 +231,9 @@ export async function refreshToken(opts: {
     const hasStoken = finalCookies.some((c) => c.name === "__zp_stoken__");
     if (!hasStoken) {
       return { ok: false, error: "未能生成 __zp_stoken__，安全验证可能失败" };
+    }
+    if (!refreshed) {
+      return { ok: false, error: "安全验证超时，__zp_stoken__ 未更新" };
     }
 
     return { ok: true, cookieString: cookiesToString(finalCookies), cookies: finalCookies };
@@ -307,7 +348,8 @@ export async function browserFetchJobs(opts: {
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     );
 
-    await injectCookieString(page, cookieString);
+    // 注入 Cookie（去掉旧 stoken）
+    await injectCookieString(page, cookieString, { stripStoken: true });
 
     const query = filters.keywords?.join(" ") ?? "java";
     const cityCode =
@@ -348,10 +390,27 @@ export async function browserFetchJobs(opts: {
 
     await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
 
-    // 等待安全验证 + API 响应（最多 20 秒）
-    for (let i = 0; i < 40; i++) {
+    // 带延迟重试的等待循环
+    let retries = 0;
+    const MAX_RETRIES = 3;
+    const RETRY_DELAYS = [2000, 4000, 6000];
+
+    for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 500));
       if (apiJobs) break;
+
+      // about:blank 延迟重试
+      const loopUrl = page.url();
+      if (loopUrl === "about:blank" && retries < MAX_RETRIES) {
+        retries++;
+        const delay = RETRY_DELAYS[retries - 1] ?? 5000;
+        await new Promise((r) => setTimeout(r, delay));
+        try {
+          await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+        } catch {
+          // ignore
+        }
+      }
     }
 
     // 检查是否被跳转到登录页
