@@ -1,6 +1,10 @@
-# Boss直聘推送插件 (boss-zhipin)
+# Openclaw集成Boss直聘岗位推送 (boss-zhipin)
 
 基于 [OpenClaw](https://github.com/nicepkg/openclaw) 的 Boss直聘岗位定时推送插件，支持将符合筛选条件的新岗位自动推送到飞书、企业微信、Telegram 等 IM 渠道。
+
+配置后可以实现让openclaw定时推送感兴趣岗位，也可以向openclaw发起请求直接进行拉取，有效提高金三银四期间的求职效率，openclaw小巧思属于是。在多次迭代后实现了cookie的稳定自动更新与使用。
+
+![6ab9d38e262191ca593c932a00012131](https://github.com/user-attachments/assets/6399dcae-e109-4cc5-a0a5-c5bad09c0c7a)
 
 ## 功能概览
 
