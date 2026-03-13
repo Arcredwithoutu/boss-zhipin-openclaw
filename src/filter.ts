@@ -70,7 +70,7 @@ export async function deduplicateJobs(jobs: JobItem[]): Promise<JobItem[]> {
   const newJobs: JobItem[] = [];
 
   for (const job of jobs) {
-    const isNew = !(await dedupe.checkAndRecord(job.encryptJobId, { namespace: "jobs" }));
+    const isNew = await dedupe.checkAndRecord(job.encryptJobId, { namespace: "jobs" });
     if (isNew) {
       newJobs.push(job);
     }

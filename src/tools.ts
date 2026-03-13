@@ -1,6 +1,6 @@
 // src/tools.ts
 import type { AnyAgentTool } from "openclaw/plugin-sdk";
-import { jsonResult, readStringParam, readNumberParam } from "openclaw/plugin-sdk";
+import { jsonResult, imageResultFromFile, readStringParam, readNumberParam } from "openclaw/plugin-sdk";
 
 function readStringArrayParam(p: Record<string, unknown>, key: string): string[] | undefined {
   const val = p[key];
@@ -252,8 +252,8 @@ export const bossBrowserLoginTool: AnyAgentTool = {
   name: "boss_browser_login",
   label: "Boss直聘 browser login",
   description:
-    "通过浏览器登录 Boss直聘。启动 Chromium 打开登录页面并截图，用户扫描微信二维码完成登录。" +
-    "登录成功后自动保存 Cookie，后续 boss_browser_fetch 可自动使用。",
+    "通过微信扫码登录 Boss直聘。获取微信小程序码图片供用户扫码，扫码后自动完成登录并保存 Cookie。" +
+    "调用 action=start 发起登录并获取二维码图片，调用 action=check 检查登录是否完成。",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -261,68 +261,59 @@ export const bossBrowserLoginTool: AnyAgentTool = {
       action: {
         type: "string",
         enum: ["start", "check"],
-        description: "start=发起登录并截图二维码，check=检查登录是否完成",
+        description: "start=发起登录并获取微信小程序码，check=检查登录是否完成",
       },
     },
     required: ["action"],
   } as any,
   async execute(_id, params) {
     const action = readStringParam(params as any, "action", { required: true });
-    const { startLogin, waitForLogin, hasSavedBrowserCookies } = await import("./browser.js");
+    const { startLogin, pollLogin } = await import("./login.js");
     const state = await readState();
 
     if (action === "start") {
       const result = await startLogin(state.proxy);
-      if (result._browser && result._page) {
-        // 保存 browser/page 引用到全局，供 check 使用
-        (globalThis as any).__boss_login_browser = result._browser;
-        (globalThis as any).__boss_login_page = result._page;
+      if (result.ok) {
+        // 保存 session 到全局，供 check 使用
+        (globalThis as any).__boss_login_session = result.session;
 
-        // 启动后台等待（最多 2 分钟）
-        waitForLogin(result._browser, result._page, 120_000).then(async (loginResult) => {
+        // 启动后台轮询（最多 2 分钟）
+        pollLogin(result.session, state.proxy, 120_000).then(async (loginResult) => {
           if (loginResult.ok) {
-            // 登录成功，同步 cookie 到 state
-            const { getSavedCookieString } = await import("./browser.js");
-            const cookieStr = await getSavedCookieString();
-            if (cookieStr) {
-              await updateState({
-                cookie: cookieStr,
-                cookieUpdatedAt: new Date().toISOString(),
-                cookieExpired: false,
-              });
-            }
+            await updateState({
+              cookie: loginResult.cookieString,
+              cookieUpdatedAt: new Date().toISOString(),
+              cookieExpired: false,
+            });
           }
-          (globalThis as any).__boss_login_browser = undefined;
-          (globalThis as any).__boss_login_page = undefined;
+          (globalThis as any).__boss_login_session = undefined;
+          (globalThis as any).__boss_login_result = loginResult;
         });
 
-        return jsonResult({
-          ok: true,
-          qrPath: result.qrPath,
-          message: `📸 登录页截图已保存到 ${result.qrPath}。请查看截图并使用微信扫码登录。扫码后等待约 5 秒，然后调用 boss_browser_login(action="check") 确认登录状态。`,
+        return imageResultFromFile({
+          label: "Boss直聘登录二维码",
+          path: result.qrPath,
+          extraText: "📸 请使用微信扫描上方小程序码登录 Boss直聘。扫码后等待约 5 秒，然后调用 boss_browser_login(action=\"check\") 确认登录状态。",
         });
       }
       return jsonResult({ ok: false, message: result.message });
     }
 
     if (action === "check") {
-      // 检查登录是否已完成
-      const hasCookies = await hasSavedBrowserCookies();
-      if (hasCookies) {
-        const { getSavedCookieString } = await import("./browser.js");
-        const cookieStr = await getSavedCookieString();
-        if (cookieStr) {
-          await updateState({
-            cookie: cookieStr,
-            cookieUpdatedAt: new Date().toISOString(),
-            cookieExpired: false,
-          });
-        }
+      // 检查后台轮询的结果
+      const loginResult = (globalThis as any).__boss_login_result;
+      if (loginResult?.ok) {
+        (globalThis as any).__boss_login_result = undefined;
         return jsonResult({ ok: true, message: "✅ 登录成功，Cookie 已保存并同步。" });
       }
 
-      const browser = (globalThis as any).__boss_login_browser;
-      if (browser) {
+      if (loginResult && !loginResult.ok) {
+        (globalThis as any).__boss_login_result = undefined;
+        return jsonResult({ ok: false, message: loginResult.message });
+      }
+
+      const session = (globalThis as any).__boss_login_session;
+      if (session) {
         return jsonResult({ ok: false, message: "⏳ 登录仍在进行中，请扫码后再次 check。" });
       }
       return jsonResult({ ok: false, message: "❌ 没有进行中的登录会话。请先调用 action=start。" });
@@ -376,7 +367,27 @@ export const bossBrowserFetchTool: AnyAgentTool = {
     });
 
     if (!tokenResult.ok) {
-      return jsonResult({ ok: false, message: `Token 刷新失败：${tokenResult.error}` });
+      // Token 刷新失败，自动触发扫码登录，将 QR 码发送到 IM
+      const { startLogin: startHttpLogin, pollLogin } = await import("./login.js");
+      const loginResult = await startHttpLogin(state.proxy);
+      if (loginResult.ok) {
+        // 后台轮询扫码（最多 2 分钟）
+        pollLogin(loginResult.session, state.proxy, 120_000).then(async (lr) => {
+          if (lr.ok) {
+            await updateState({
+              cookie: lr.cookieString,
+              cookieUpdatedAt: new Date().toISOString(),
+              cookieExpired: false,
+            });
+          }
+        });
+        return imageResultFromFile({
+          label: "Boss直聘登录二维码",
+          path: loginResult.qrPath,
+          extraText: `⚠️ Token 刷新失败（${tokenResult.error}）。请用微信扫码重新登录，登录后再次拉取岗位。`,
+        });
+      }
+      return jsonResult({ ok: false, message: `Token 刷新失败：${tokenResult.error}，且登录初始化失败：${loginResult.message}` });
     }
 
     // 步骤2：用刷新后的 Cookie 走 HTTP API（更快、更轻量）

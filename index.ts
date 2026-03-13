@@ -65,10 +65,11 @@ async function ensureCronJob(
     }
 
     const cronMessage =
-      "你是 Boss直聘推送助手。请调用 boss_fetch_jobs 工具（参数：deduplicate=true, publishedWithin='3h'），获取最近3小时的新岗位。" +
+      "你是 Boss直聘推送助手。请先调用 boss_browser_fetch 工具（参数：deduplicate=true），获取新岗位。" +
       "如果返回 ok=true 且 count>0，将 formatted 字段的内容直接作为你的回复输出。" +
       "如果 count=0，回复 'HEARTBEAT_OK 暂无新岗位'。" +
-      "如果 expired=true，请提示用户更新 Cookie。";
+      "如果失败（expired=true 或 Token 刷新失败），工具会自动发送登录二维码图片，请提示用户扫码登录后重试。" +
+      "如果 boss_browser_fetch 不可用，降级调用 boss_fetch_jobs（参数：deduplicate=true, publishedWithin='3h'）。";
 
     const addArgs = [
       "cron", "add",
