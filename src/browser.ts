@@ -150,9 +150,15 @@ function cookiesToString(cookies: Cookie[]): string {
 // Token refresh: 通过浏览器自动刷新 __zp_stoken__
 // ────────────────────────────────────────────────────────────────────────────
 
+export type TokenRefreshFailReason =
+  | "stoken_generation_failed"   // verify-sdk 未生成 __zp_stoken__
+  | "security_timeout"           // 安全验证超时
+  | "browser_error"              // Puppeteer/Xvfb 启动或运行失败
+  | "about_blank_loop";          // 反复被重定向到 about:blank（IP 被严格封禁）
+
 export type TokenRefreshResult =
   | { ok: true; cookieString: string; cookies: Cookie[] }
-  | { ok: false; error: string };
+  | { ok: false; reason: TokenRefreshFailReason; error: string };
 
 /**
  * 使用 Puppeteer 刷新 __zp_stoken__
@@ -230,16 +236,23 @@ export async function refreshToken(opts: {
 
     const hasStoken = finalCookies.some((c) => c.name === "__zp_stoken__");
     if (!hasStoken) {
-      return { ok: false, error: "未能生成 __zp_stoken__，安全验证可能失败" };
+      const wasAboutBlank = retries >= MAX_RETRIES;
+      return {
+        ok: false,
+        reason: wasAboutBlank ? "about_blank_loop" : "stoken_generation_failed",
+        error: wasAboutBlank
+          ? `反复被重定向到 about:blank（${retries} 次），verify-sdk 未通过。可能 IP 被严格封禁或需要等待冷却（5-10分钟）。`
+          : "未能生成 __zp_stoken__，verify-sdk 安全验证未触发。",
+      };
     }
     if (!refreshed) {
-      return { ok: false, error: "安全验证超时，__zp_stoken__ 未更新" };
+      return { ok: false, reason: "security_timeout", error: "安全验证超时（30秒），__zp_stoken__ 未更新。可能服务端限流，建议等待几分钟后重试。" };
     }
 
     return { ok: true, cookieString: cookiesToString(finalCookies), cookies: finalCookies };
   } catch (err) {
     if (browser) await browser.close().catch(() => {});
-    return { ok: false, error: `浏览器错误: ${String(err)}` };
+    return { ok: false, reason: "browser_error", error: `浏览器错误: ${String(err)}` };
   }
 }
 

@@ -10,7 +10,7 @@ function readStringArrayParam(p: Record<string, unknown>, key: string): string[]
   return undefined;
 }
 import { readState, updateState } from "./storage.js";
-import { fetchJobs } from "./fetcher.js";
+import { fetchJobs, type FailReason } from "./fetcher.js";
 import { filterByConditions, deduplicateJobs } from "./filter.js";
 import { formatJobList, formatStatusReport } from "./formatter.js";
 import type { Filters } from "./types.js";
@@ -164,15 +164,16 @@ export const bossFetchJobsTool: AnyAgentTool = {
     });
 
     if (!result.ok) {
-      if (result.expired) {
+      if (result.reason === "cookie_expired") {
         await updateState({ cookieExpired: true });
-        return jsonResult({
-          ok: false,
-          expired: true,
-          message: result.message,
-        });
       }
-      return jsonResult({ ok: false, expired: false, message: `拉取失败：${result.error}` });
+      return jsonResult({
+        ok: false,
+        reason: result.reason,
+        message: result.message,
+        ...(result.rawCode !== undefined ? { rawCode: result.rawCode } : {}),
+        ...(result.rawMessage ? { rawMessage: result.rawMessage } : {}),
+      });
     }
 
     let jobs = result.jobs.slice(0, limit);
@@ -367,27 +368,33 @@ export const bossBrowserFetchTool: AnyAgentTool = {
     });
 
     if (!tokenResult.ok) {
-      // Token 刷新失败，自动触发扫码登录，将 QR 码发送到 IM
-      const { startLogin: startHttpLogin, pollLogin } = await import("./login.js");
-      const loginResult = await startHttpLogin(state.proxy);
-      if (loginResult.ok) {
-        // 后台轮询扫码（最多 2 分钟）
-        pollLogin(loginResult.session, state.proxy, 120_000).then(async (lr) => {
-          if (lr.ok) {
-            await updateState({
-              cookie: lr.cookieString,
-              cookieUpdatedAt: new Date().toISOString(),
-              cookieExpired: false,
-            });
-          }
-        });
-        return imageResultFromFile({
-          label: "Boss直聘登录二维码",
-          path: loginResult.qrPath,
-          extraText: `⚠️ Token 刷新失败（${tokenResult.error}）。请用微信扫码重新登录，登录后再次拉取岗位。`,
-        });
+      // Token 刷新失败 — 根据原因决定处理策略
+      if (tokenResult.reason === "about_blank_loop" || tokenResult.reason === "browser_error") {
+        // IP 严格封禁或浏览器异常 — 自动触发扫码登录
+        const { startLogin: startHttpLogin, pollLogin } = await import("./login.js");
+        const loginResult = await startHttpLogin(state.proxy);
+        if (loginResult.ok) {
+          pollLogin(loginResult.session, state.proxy, 120_000).then(async (lr) => {
+            if (lr.ok) {
+              await updateState({
+                cookie: lr.cookieString,
+                cookieUpdatedAt: new Date().toISOString(),
+                cookieExpired: false,
+              });
+            }
+          });
+          return imageResultFromFile({
+            label: "Boss直聘登录二维码",
+            path: loginResult.qrPath,
+            extraText: `⚠️ stoken 刷新失败（${tokenResult.reason}: ${tokenResult.error}）。请用微信扫码重新登录，登录后再次拉取岗位。`,
+          });
+        }
       }
-      return jsonResult({ ok: false, message: `Token 刷新失败：${tokenResult.error}，且登录初始化失败：${loginResult.message}` });
+      return jsonResult({
+        ok: false,
+        reason: tokenResult.reason,
+        message: `stoken 刷新失败：${tokenResult.error}`,
+      });
     }
 
     // 步骤2：用刷新后的 Cookie 走 HTTP API（更快、更轻量）
@@ -407,11 +414,16 @@ export const bossBrowserFetchTool: AnyAgentTool = {
     });
 
     if (!result.ok) {
-      if (result.expired) {
+      if (result.reason === "cookie_expired") {
         await updateState({ cookieExpired: true });
-        return jsonResult({ ok: false, expired: true, message: result.message });
       }
-      return jsonResult({ ok: false, message: `拉取失败：${result.error}` });
+      return jsonResult({
+        ok: false,
+        reason: result.reason,
+        message: result.message,
+        ...(result.rawCode !== undefined ? { rawCode: result.rawCode } : {}),
+        ...(result.rawMessage ? { rawMessage: result.rawMessage } : {}),
+      });
     }
 
     let jobs = result.jobs.slice(0, limit);

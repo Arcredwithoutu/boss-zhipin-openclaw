@@ -25,10 +25,33 @@ const CITY_CODE_MAP: Record<string, string> = {
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+/**
+ * 错误原因分类，便于 AI agent 精准诊断和处理：
+ *
+ * - stoken_expired:   __zp_stoken__ 过期（~5分钟有效），需要通过 Puppeteer 刷新
+ * - cookie_expired:   wt2/zp_at/bst 认证 Cookie 过期，需要重新扫码登录
+ * - ip_blocked:       服务器 IP 被 Boss直聘 识别为异常环境，需要配置/更换代理
+ * - env_abnormal:     环境异常（通用），可能是 IP 或 stoken 问题
+ * - rate_limited:     请求频率过高被限流，需要等待冷却
+ * - network_error:    网络连接错误（代理不通、DNS 解析失败等）
+ * - api_error:        其他 API 错误（非 code=37）
+ * - parse_error:      响应解析失败（非 JSON）
+ * - http_error:       HTTP 状态码异常（非 2xx）
+ */
+export type FailReason =
+  | "stoken_expired"
+  | "cookie_expired"
+  | "ip_blocked"
+  | "env_abnormal"
+  | "rate_limited"
+  | "network_error"
+  | "api_error"
+  | "parse_error"
+  | "http_error";
+
 export type FetchResult =
   | { ok: true; jobs: JobItem[] }
-  | { ok: false; expired: true; message: string }
-  | { ok: false; expired: false; error: string };
+  | { ok: false; reason: FailReason; message: string; rawCode?: number; rawMessage?: string };
 
 export type FetchOptions = {
   cookie: string;
@@ -126,7 +149,7 @@ async function fetchOnePage(opts: FetchOptions & { page: number }): Promise<Fetc
     try {
       agent = await createProxyAgent(proxy);
     } catch (err) {
-      return { ok: false, expired: false, error: `代理连接失败 (${proxy}): ${String(err)}` };
+      return { ok: false, reason: "network_error", message: `代理连接失败 (${proxy}): ${String(err)}` };
     }
   }
 
@@ -137,37 +160,79 @@ async function fetchOnePage(opts: FetchOptions & { page: number }): Promise<Fetc
     status = resp.status;
     body = resp.body;
   } catch (err) {
-    return { ok: false, expired: false, error: `网络错误: ${String(err)}` };
+    return { ok: false, reason: "network_error", message: `网络错误: ${String(err)}` };
   }
 
   if (status < 200 || status >= 300) {
-    return { ok: false, expired: false, error: `HTTP ${status}` };
+    return { ok: false, reason: "http_error", message: `HTTP ${status}` };
   }
 
   let data: any;
   try {
     data = JSON.parse(body);
   } catch {
-    return { ok: false, expired: false, error: "响应解析失败" };
+    return { ok: false, reason: "parse_error", message: "响应解析失败（非 JSON）" };
   }
 
   if (data?.code === 37 || data?.code === "37") {
-    const msg = data?.message ?? "";
-    // 区分"环境异常"（IP被封）和"Cookie过期"
+    const msg: string = data?.message ?? "";
+    const raw = { rawCode: 37, rawMessage: msg };
+
+    // 细粒度分类 code=37 的具体场景
     if (msg.includes("环境") || msg.includes("异常")) {
+      // "您的环境存在异常" — 通常是 stoken 过期或 IP 问题
+      // 进一步区分：检查是否有 __zp_stoken__
+      const hasStoken = cookie.includes("__zp_stoken__=");
+
+      if (!hasStoken) {
+        // 没有 stoken，大概率是 stoken 缺失导致
+        return {
+          ok: false, reason: "stoken_expired", ...raw,
+          message: "🔑 __zp_stoken__ 缺失，需要通过浏览器刷新安全令牌。建议使用 boss_browser_fetch 自动刷新。",
+        };
+      }
+
+      // 有 stoken 但仍然环境异常 → 可能是 stoken 过期或 IP 被封
+      if (proxy) {
+        return {
+          ok: false, reason: "ip_blocked", ...raw,
+          message: "🚫 Boss直聘检测到环境异常。可能原因：(1) __zp_stoken__ 已过期（~5分钟有效），建议用 boss_browser_fetch 刷新；(2) 代理 IP 被封禁，尝试更换代理。",
+        };
+      }
+
       return {
-        ok: false,
-        expired: true,
-        message:
-          "⚠️ Boss直聘检测到环境异常（通常是服务器 IP 被识别为非正常浏览器环境）。" +
-          (proxy ? "当前代理可能也被封，请尝试更换代理。" : "请配置国内代理后重试。"),
+        ok: false, reason: "ip_blocked", ...raw,
+        message: "🚫 Boss直聘检测到环境异常，服务器 IP 被识别为非正常浏览器环境。请配置国内代理（boss_set_proxy）后重试。",
       };
     }
-    return { ok: false, expired: true, message: "⚠️ Boss直聘 Cookie 已失效，请重新上传。" };
+
+    if (msg.includes("登录") || msg.includes("login") || msg.includes("token")) {
+      return {
+        ok: false, reason: "cookie_expired", ...raw,
+        message: "🔒 认证 Cookie 已失效（wt2/zp_at 过期），需要重新扫码登录（boss_browser_login）。",
+      };
+    }
+
+    if (msg.includes("频繁") || msg.includes("频率") || msg.includes("限") || msg.includes("稍后")) {
+      return {
+        ok: false, reason: "rate_limited", ...raw,
+        message: "⏳ 请求频率过高被限流，请等待 5-10 分钟后重试。",
+      };
+    }
+
+    // 兜底：无法从 message 精确判断
+    return {
+      ok: false, reason: "env_abnormal", ...raw,
+      message: `⚠️ Boss直聘返回 code=37: ${msg || "未知错误"}。可能原因：stoken 过期、IP 异常、Cookie 失效。建议先尝试 boss_browser_fetch（自动刷新 stoken），若仍失败则重新扫码登录。`,
+    };
   }
 
   if (data?.code !== 0) {
-    return { ok: false, expired: false, error: `API错误 code=${data?.code}: ${data?.message ?? ""}` };
+    return {
+      ok: false, reason: "api_error",
+      rawCode: data?.code, rawMessage: data?.message ?? "",
+      message: `API 错误 code=${data?.code}: ${data?.message ?? ""}`,
+    };
   }
 
   const jobList: JobItem[] = (data?.zpData?.jobList ?? []).map((j: any): JobItem => ({
